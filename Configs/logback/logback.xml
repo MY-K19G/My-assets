@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!-- 1. General Logging Level for the Application -->
+    <!-- 
+         - The root level defines the global logging level.
+         - Levels: TRACE < DEBUG < INFO < WARN < ERROR < OFF
+         - Logs only messages at or above the configured level.
+    -->
+    <root level="INFO">
+        <!-- Use the console and file appenders for root logging -->
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="FILE" />
+    </root>
+
+    <!-- 2. Console Appender -->
+    <!-- 
+         - Outputs logs to the console (e.g., terminal or IDE output).
+         - Best for development environments.
+    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- Log format pattern -->
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 3. File Appender -->
+    <!-- 
+         - Logs messages to a file.
+         - Suitable for production to persist logs for auditing or debugging.
+    -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- Main log file -->
+        <file>logs/application.log</file>
+
+        <!-- Rolling policy: Determines when to roll over to a new file -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- File name pattern for rolled-over files -->
+            <fileNamePattern>logs/application-%d{yyyy-MM-dd}.log</fileNamePattern>
+            
+            <!-- Retain log files for the last 30 days -->
+            <maxHistory>30</maxHistory>
+            
+            <!-- Optional: Limit the total size of archived logs -->
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+
+        <!-- Encoder: Defines log format -->
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 4. Package-Specific Loggers -->
+    <!-- 
+         - Fine-grained control for logging specific packages or classes.
+         - Helps to debug individual components without overwhelming logs.
+    -->
+    <logger name="com.example" level="DEBUG" additivity="false">
+        <!-- Logs only to the console for this package -->
+        <appender-ref ref="CONSOLE" />
+    </logger>
+
+    <!-- Spring Framework Logs -->
+    <logger name="org.springframework" level="WARN" />
+    
+    <!-- Hibernate SQL Logs -->
+    <logger name="org.hibernate.SQL" level="OFF" />
+    
+    <!-- 5. Threshold Filter (Optional) -->
+    <!-- 
+         - Filters logs to include only those above a certain level.
+         - Can be added to specific appenders (e.g., console).
+    -->
+    <appender name="FILTERED_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 6. Async Appender (Optional) -->
+    <!-- 
+         - Asynchronous appender for high-performance logging.
+         - Buffers logs and writes them in a separate thread.
+    -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE" />
+    </appender>
+
+    <!-- Example of Root Logger Using Async File -->
+    <root level="ERROR">
+        <appender-ref ref="ASYNC_FILE" />
+    </root>
+    
+    <!-- 7. Status Listener (Optional) -->
+    <!-- 
+         - Outputs internal Logback status messages to the console.
+         - Useful for debugging configuration issues.
+    -->
+    <statusListener class="ch.qos.logback.core.status.OnConsoleStatusListener" />
+
+</configuration>
