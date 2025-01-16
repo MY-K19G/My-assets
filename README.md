@@ -1,3 +1,3 @@
 # My-assets
 
-Quickly get important information 
+Quickly get important information.
