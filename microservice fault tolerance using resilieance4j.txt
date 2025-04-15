@@ -1,0 +1,1210 @@
+=========
+1.What is Fault Tolerance in Microservices?
+	Fault tolerance in microservices refers to the ability of a system to continue operating properly in the event of the failure of some of its components. Since microservices architectures are made up of many small, independent services that communicate over a network, failures can happen in various forms—network issues, service crashes, database downtime, etc.
+=========
+2.Core modules of Resilience4j
+
+    resilience4j-circuitbreaker: Circuit breaking
+    resilience4j-ratelimiter: Rate limiting
+    resilience4j-bulkhead: Bulkheading
+    resilience4j-retry: Automatic retrying (sync and async)
+    resilience4j-cache: Result caching
+    resilience4j-timelimiter: Timeout handling
+=========
+3.How to implement Fault Tolerance in Microservices using Resilience4j?
+	Create a Spring Boot Project including all dependencies using STS
+	
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-aop</artifactId>
+		</dependency>
+		
+	Pattern				Annotation			Purpose
+	Circuit Breaker	@CircuitBreaker		Stop calling failing services
+	Retry			@Retry	Retry 		failed calls
+	TimeLimiter		@TimeLimiter		Fail after timeout
+	RateLimiter		@RateLimiter		Control call rate
+	Bulkhead		@Bulkhead			Limit concurrent requests
+=========	
+4.What is Rate Limiting?
+	Rate Limiting is a technique used to control the number of requests a client can make to a server or service within a specified time window. It's essential in microservices, APIs, and distributed systems to prevent system overload, abuse, or denial-of-service attacks.
+	
+	Let’s say we set a limit of 100 requests per minute per user.
+    A user can make up to 100 API calls.
+    If they try the 101st call within the same minute, it will be rejected or delayed.
+	
+	application.yml(default value)
+	----------------
+		resilience4j.ratelimiter:
+		 instances:
+		  default:
+		    limitForPeriod: 50
+		    limitRefreshPeriod: 500ns
+		    timeoutDuration: 5s
+	#default is not fixed you can name any thing it depends upon the annnotation
+		@RateLimiter(name = "default", fallbackMethod = "fallback")
+		public String callService() { ... }
+
+  limitForPeriod: 5
+		This means only 5 calls are allowed per refresh period (which is 1 second in this case).
+		If more than 5 calls come in within that 1 second, they will be blocked (or go to a fallback method if you’ve defined one).
+	Example:
+		If 10 users try to call the method at the same time, only the first 5 will succeed, the rest will be rate-limited.
+  limitRefreshPeriod: 1s
+    This is the time window that gets reset every 1 second.
+    After every second, the counter is refreshed and you can make 5 new calls.
+
+  timeoutDuration: 500ms
+    When a request arrives and the limit has already been reached, Resilience4j waits up to 500 milliseconds to see if a permit becomes available.
+    If no permit is available within 500ms, the call is rejected and optionally handled by a fallback.
+	So:
+    If the system is busy and all 5 calls are used, any new request will wait 0.5 seconds before giving up.
+	
+	TL;DR
+    Max 5 calls per second are allowed.
+    Any extra call will wait up to 500ms for a slot.
+    If no slot opens in that time → fallback or error.
+	
+	you can name a single ratelimit to diffrent api calls
+	application.yml
+	---------------
+	resilience4j.ratelimiter.instances:
+	sharedLimiter:
+    limitForPeriod: 10
+    limitRefreshPeriod: 1s
+    timeoutDuration: 300ms
+@Service
+public class MyService {
+
+    @RateLimiter(name = "sharedLimiter", fallbackMethod = "fallback")
+    public String api1() {
+        return "✅ API 1 Response";
+    }
+
+    @RateLimiter(name = "sharedLimiter", fallbackMethod = "fallback")
+    public String api2() {
+        return "✅ API 2 Response";
+    }
+
+    public String fallback(Throwable t) {
+        return "⛔ Rate limit hit — try again later.";
+    }
+}
+
+		OR (using a RateLimiterRegistry)
+		--------------------------------
+		
+	package com.example.demo.config;
+
+import io.github.resilience4j.ratelimiter.*;
+import org.springframework.context.annotation.*;
+
+import java.time.Duration;
+
+@Configuration
+public class Resilience4jRateLimiterConfig {
+
+    @Bean
+    public RateLimiterRegistry rateLimiterRegistry() {
+        RateLimiterConfig config = RateLimiterConfig.custom()
+                .limitForPeriod(5)
+                .limitRefreshPeriod(Duration.ofSeconds(1))
+                .timeoutDuration(Duration.ofMillis(300))
+                .build();
+
+        return RateLimiterRegistry.of(config);
+    }
+
+    // Optional: Register a default limiter with a name
+    @Bean
+    public RateLimiter sharedLimiter(RateLimiterRegistry registry) {
+        return registry.rateLimiter("sharedLimiter");
+    }
+}
+now call the same service (no yml configuration needed)
+
+=========
+5.What is Retry?
+	Retry is a resilience pattern that automatically re-attempts a failed operation a few times before giving up.
+	It’s useful when:
+		A remote service is temporarily down
+		A network call fails briefly
+		There’s a transient error (e.g., timeout, 500 response)
+		
+		Imagine you're ordering food online. The app fails the first time (network glitch). Instead of quitting, it tries again automatically, and it works the second time. That’s retry.
+		
+		application.yml
+		---------------
+		resilience4j:
+  retry:
+    instances:
+      myRetry:
+        max-attempts: 3
+        wait-duration: 500ms
+        retry-exceptions:
+          - java.io.IOException
+          - java.lang.RuntimeException
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+Explained
+---------
+1. resilience4j.retry.instances:
+    Purpose: This section defines one or more Retry instances.
+    myRetry: This is the name of the retry configuration. You can reference this name in your code with the @Retry annotation.
+
+2. max-attempts: 3:
+    Purpose: This specifies how many total attempts (including the initial one) should be made when a retry is triggered.
+    In this case: The system will try 3 times: the first attempt, and then 2 retry attempts if an exception occurs.
+
+3. wait-duration: 500ms:
+    Purpose: This sets the time interval between each retry attempt.
+    In this case: After the first failure, the system will wait for 500 milliseconds before trying again.
+
+4. retry-exceptions:
+    Purpose: This lists the exceptions that should trigger a retry. When one of these exceptions is thrown, Resilience4j will retry the operation (up to max-attempts).
+        In this case:
+            java.io.IOException: Retry will happen if an IOException is thrown.
+            java.lang.RuntimeException: Retry will happen if a RuntimeException is thrown.
+        If the method fails with one of these exceptions, Resilience4j will retry the operation as per the configuration.
+
+5. ignore-exceptions:
+    Purpose: This lists the exceptions that should not trigger a retry. If any of these exceptions are thrown, Resilience4j will not retry and will immediately return the error to the caller.
+        In this case:
+            java.lang.IllegalArgumentException: If an IllegalArgumentException is thrown, it will not trigger a retry, even if retry is enabled for other exceptions.
+        These exceptions are treated as non-transient errors, and the retry mechanism does not apply to them.
+		
+		TL;DR: YAML Retry Configuration
+    max-attempts: Total retry attempts (including the initial call).
+    wait-duration: Time between each retry attempt.
+	retry-exceptions: Exceptions that will trigger a retry.
+    ignore-exceptions: Exceptions that won’t trigger a retry.
+    
+	Without retry-exceptions, Resilience4j retries on any exception by default.
+    You don’t need to specify the exceptions if you want to retry on all exceptions (not just specific ones).
+If you want to avoid retrying certain exceptions, you would need to use ignore-exceptions to specify which exceptions should not trigger a retry.
+
+package com.example.demo.config;
+
+import io.github.resilience4j.retry.*;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.concurrent.TimeoutException;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class RetryConfig {
+
+    @Bean
+    public Retry myRetry() {
+        // Define the custom retry configuration
+        RetryConfig config = RetryConfig.custom()
+                .maxAttempts(5)  // Total of 5 attempts (1 original + 4 retries)
+                .waitDuration(Duration.ofMillis(1000))  // Wait for 1000ms between retries
+                .retryExceptions(IOException.class, TimeoutException.class)  // Retry on specific exceptions
+                .ignoreExceptions(IllegalArgumentException.class)  // Don't retry on IllegalArgumentException
+                .retryOnResult(result -> result == null || result.isEmpty())  // Retry if result is null or empty
+                .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(100), 2))  // Exponential backoff (100ms, doubling)
+                .failAfterMaxAttempts(true)  // Fail immediately after max attempts
+                .maxWaitDuration(Duration.ofMillis(5000))  // Max wait time before retrying
+                .retryOnThrowable(throwable -> throwable instanceof IOException || throwable instanceof TimeoutException)  // Retry based on throwable condition
+                .build();
+
+        // Register the custom retry configuration
+        RetryRegistry retryRegistry = RetryRegistry.of(config);
+        return retryRegistry.retry("myRetry");
+    }
+}
+TL;DR
+To configure Resilience4j Retry programmatically in Spring Boot, you can use the RetryConfig.custom() method with various options:
+    maxAttempts: Total attempts including retries.
+    waitDuration: Wait time between retries.
+    retryExceptions: List of exceptions that trigger retries.
+    ignoreExceptions: List of exceptions that don't trigger retries.
+    retryOnResult: Retry based on the method result.
+    intervalFunction: Defines the backoff strategy (e.g., exponential backoff).
+    failAfterMaxAttempts: Fail immediately after the max attempts are reached.
+    retryOnThrowable: Retry based on custom throwable conditions.
+	
+	*minimal use is same as yml (e.g:retryOnResult) you can skip this if you want that with yml then you can throw those exception and retryExceptions will handled that.
+	
+5.what is TimeLimiter?
+	TimeLimiter is a part of the Resilience4j library that helps you set a maximum allowed duration (timeout) for method executions—especially asynchronous ones like CompletableFuture, Mono, or Flux.
+	If the method doesn’t finish within the specified time, it gets automatically cancelled or timed out.
+	
+	Imagine you have a service that calls an external API or performs a long-running task. Sometimes that task might hang or take too long. If you don't set a timeout:
+    The user keeps waiting ⏳
+    Resources like threads get stuck
+    Your app may slow down or crash
+	
+	With TimeLimiter, you say:
+	"I’ll wait for 3 seconds. If it’s not done by then, I give up!"
+	
+	application.yml
+	---------------
+	resilience4j.timelimiter:
+  instances:
+    fastApi:
+      timeoutDuration: 1s
+      cancelRunningFuture: false
+
+    slowApi:
+      timeoutDuration: 3s
+      cancelRunningFuture: true
+
+
+	timeoutDuration	       Duration	  1s	  Max duration to wait for the future to complete. If it takes longer, timeout happens.
+	cancelRunningFuture	   boolean	  true	 If true, will cancel the running future when it times out. This helps free up resources.
+	
+	package com.example.demo.service;
+
+import org.springframework.stereotype.Service;
+
+@Service
+public class BackendService {
+
+    public String slowMethod() {
+        try {
+            Thread.sleep(5000); // simulate 5-second delay
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "Success from slow method!";
+    }
+}
+
+---
+package com.example.demo.controller;
+
+import com.example.demo.service.BackendService;
+import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.concurrent.CompletableFuture;
+
+@RestController
+public class BackendController {
+
+    private final BackendService backendService;
+
+    public BackendController(BackendService backendService) {
+        this.backendService = backendService;
+    }
+
+    @GetMapping("/api/slow")
+    @TimeLimiter(name = "slowApi", fallbackMethod = "fallback")
+    public CompletableFuture<String> callSlowService() {
+        return CompletableFuture.supplyAsync(() -> backendService.slowMethod());
+    }
+
+    public CompletableFuture<String> fallback(Throwable t) {
+        return CompletableFuture.completedFuture("Fallback: service timed out!");
+    }
+}
+
+--
+http://localhost:8081/api/slow
+You’ll get the fallback response after 3 seconds, because the real method sleeps for 5 seconds.
+
+    If your task is doing something interruptible like Thread.sleep() or wait() — it will stop immediately ✅
+    If your task is doing CPU work or is stuck in non-interruptible code — it will keep running silently ❌
+
+public String nonInterruptibleTask() {
+    long start = System.currentTimeMillis();
+    System.out.println("🧮 Starting heavy CPU work...");
+
+    // Busy loop doing CPU-bound work for 5 seconds
+    while (System.currentTimeMillis() - start < 5000) {
+        // Simulate CPU load — non-interruptible
+        Math.sqrt(Math.random());
+    }
+
+    System.out.println("✅ Finished CPU work.");
+    return "Done with CPU work";
+}
+*cancels in ~2s (fallback is triggered), but CPU loop continues running in background silently
+*Resilience4j’s TimeLimiter only works with asynchronous, non-blocking types — specifically:
+    CompletableFuture
+    Mono / Flux (if using Reactor)
+	
+	public String slowMethod() {
+    Thread.sleep(5000); // blocking!
+    return "Done";
+}
+can’t be cancelled or interrupted by TimeLimiter once it starts. That’s why you wrap it in CompletableFuture.supplyAsync()
+---without yml configuration by using TimeLimiterRegistry but also without @TimeLimit() can be done
+import io.github.resilience4j.timelimiter.TimeLimiter;
+import io.github.resilience4j.timelimiter.TimeLimiterConfig;
+import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.time.Duration;
+
+@Configuration
+public class TimeLimiterConfig {
+
+    @Bean
+    public TimeLimiterRegistry timeLimiterRegistry() {
+        // Create custom TimeLimiterConfig
+        TimeLimiterConfig timeLimiterConfig = TimeLimiterConfig.custom()
+                .timeoutDuration(Duration.ofSeconds(2))    // Timeout set to 2 seconds
+                .cancelRunningFuture(true)                 // Automatically cancel the running future if it exceeds the timeout
+                .build();
+
+        // Register TimeLimiter with name "backendService"
+        TimeLimiterRegistry registry = TimeLimiterRegistry.of(timeLimiterConfig);
+
+        return registry;
+    }
+}
+
+---
+import io.github.resilience4j.timelimiter.TimeLimiter;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+@Service
+public class BackendService {
+
+    private final TimeLimiterRegistry timeLimiterRegistry;
+    private final ExecutorService executorService = Executors.newCachedThreadPool();
+
+    @Autowired
+    public BackendService(TimeLimiterRegistry timeLimiterRegistry) {
+        this.timeLimiterRegistry = timeLimiterRegistry;
+    }
+
+    public CompletableFuture<String> executeWithTimeout() {
+        // Get the TimeLimiter instance by name
+        TimeLimiter timeLimiter = timeLimiterRegistry.timeLimiter("backendService");
+
+        // Simulate a slow task wrapped in a CompletableFuture
+        return timeLimiter.executeFutureSupplier(() ->
+            CompletableFuture.supplyAsync(this::longRunningTask, executorService)
+        ).exceptionally(throwable -> {
+            System.out.println("⚠️ Timeout or error: " + throwable.getMessage());
+            return "Fallback response due to timeout";
+        });
+    }
+
+    private String longRunningTask() {
+        try {
+            // Simulate a slow task (5 seconds)
+            Thread.sleep(5000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "Task interrupted!";
+        }
+        return "Task completed successfully";
+    }
+}
+----
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.concurrent.CompletableFuture;
+
+@RestController
+public class BackendController {
+
+    private final BackendService backendService;
+
+    public BackendController(BackendService backendService) {
+        this.backendService = backendService;
+    }
+
+    @GetMapping("/api/timeout")
+    public CompletableFuture<String> callWithTimeout() {
+        return backendService.executeWithTimeout();
+    }
+}
+---
+GET http://localhost:8080/api/timeout
+It will trigger the timeout logic and, after 2 seconds, respond with fallback message (since the task takes 5 seconds).
+*The fallback method should return the same type (CompletableFuture in this case).
+
+6. what is CircuitBreaker in resilience4j
+	 a circuit breaker is a mechanism used to prevent a system from making repeated, costly calls to a service that is likely to fail. It's a core pattern in the circuit breaker design pattern, widely used to enhance the resilience and fault tolerance of microservices.
+	 
+	 Closed: The circuit breaker allows requests to flow through to the service as usual. If the service is performing well, the circuit breaker stays in this state.
+
+	Open: If a threshold for failures (e.g., a certain percentage of failed requests) is exceeded, the circuit breaker trips and stops any requests from being sent to the failing service. This helps avoid further strain on the service and gives it time to recover.
+
+	Half-Open: After a predefined timeout period, the circuit breaker transitions to the half-open state to test whether the service has recovered. If the requests are successful, the circuit breaker goes back to the Closed state. If the requests still fail, it will return to the Open state.
+	
+	state
+	-----
+	protecting the system from cascading failures. It has three states:
+    Closed: Normal operation.
+    Open: Service is failing, no requests are sent.
+    Half-Open: Test phase to check if the service has recovered.
+	
+	use case
+	----
+	External service/API failures: Prevent repeated calls to a downed external service.
+	Database issues: Avoid retrying failed database operations.
+	Microservices communication failures: Prevent one failing service from affecting others.
+	Service degradation/latency: Stop further calls if a service is slow or unreliable.
+	Fallback strategies: Provide graceful degradation when critical services are unavailable.
+	
+	application.yml
+	--------------
+	resilience4j.circuitbreaker:
+  instances:
+    myServiceCircuitBreaker:
+      registerHealthIndicator: true
+      failureRateThreshold: 50
+      waitDurationInOpenState: 5000ms
+      ringBufferSizeInClosedState: 100
+      ringBufferSizeInHalfOpenState: 10
+      slidingWindowType: COUNT_BASED
+      slidingWindowSize: 100
+      minimumNumberOfCalls: 10
+      waitIntervalInOpenState: 3000ms
+      timeoutDuration: 2000ms
+      automaticTransitionFromOpenToHalfOpen: true
+
+    resilience4j.circuitbreaker.instances:
+
+        This section contains the configuration for the circuit breaker. Each circuit breaker is named (e.g., myCircuitBreaker), and it can have different configurations.
+
+    registerHealthIndicator:
+
+        Type: boolean
+
+        If set to true, Resilience4j will create a health indicator to report the health status of the circuit breaker, which can be used in monitoring tools (e.g., Spring Boot Actuator).
+
+    failureRateThreshold:
+
+        Type: int
+
+        The percentage of failed calls that will trigger the Open state. If more than this percentage of requests fail (e.g., 50%), the circuit breaker will open.
+
+        Default: 50%
+
+    waitDurationInOpenState:
+
+        Type: Duration (in milliseconds)
+
+        How long the circuit breaker stays in the Open state before transitioning to the Half-Open state to test if the service is available again.
+
+        Default: 1000ms (1 second)
+
+    ringBufferSizeInClosedState:
+
+        Type: int
+
+        The number of calls to track when the circuit breaker is in the Closed state. Resilience4j uses this number of recent calls to calculate the failure rate and decide whether the circuit breaker should open.
+
+        Default: 100
+
+    ringBufferSizeInHalfOpenState:
+
+        Type: int
+
+        The number of test requests that are allowed to pass through when the circuit breaker is in the Half-Open state.
+
+        Default: 10
+
+    slidingWindowSize:
+
+        Type: int
+
+        The number of recent calls to be considered when calculating the failure rate.
+
+        Default: 100
+
+    slidingWindowType:
+
+        Type: String
+
+        Defines the mode for the sliding window used to calculate failure rates. It can be:
+
+            COUNT_BASED: Count-based window (measuring a fixed number of calls).
+
+            TIME_BASED: Time-based window (measuring the failure rate over a fixed duration).
+
+        Default: COUNT_BASED
+
+    minimumNumberOfCalls:
+
+        Type: int
+
+        The minimum number of calls required to calculate the failure rate. If fewer calls are recorded, the circuit breaker will not open or change state until enough calls are made.
+
+        Default: 100
+
+    waitIntervalInOpenState:
+
+		Type: Duration
+
+		Specifies the duration the circuit breaker will stay in the Open state before transitioning to the Half-Open state for retrying.
+
+		Default: 500ms
+
+    timeoutDuration:
+
+		Type: Duration
+
+		The timeout duration that is used for determining if a request failed. If the request takes longer than this duration, it is counted as a failure.
+
+		Default: 1000ms
+
+    automaticTransitionFromOpenToHalfOpen:
+
+		Type: boolean
+
+		Determines if the circuit breaker should automatically transition from the Open state to the Half-Open state after the waitDurationInOpenState period. If set to false, you will need to manage the transition manually.
+
+		Default: true
+		
+		--------CircuitBreakerRegistry----
+		import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.time.Duration;
+
+@Configuration
+public class CircuitBreakerConfig {
+
+    @Bean
+    public CircuitBreakerRegistry circuitBreakerRegistry() {
+        // Define the CircuitBreaker configuration
+        CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+                .failureRateThreshold(50) // 50% failure rate threshold
+                .waitDurationInOpenState(Duration.ofMillis(5000)) // 5 seconds open state duration
+                .ringBufferSizeInClosedState(100) // Number of requests to track in CLOSED state
+                .ringBufferSizeInHalfOpenState(10) // Number of requests allowed in HALF-OPEN state
+                .slidingWindowSize(100) // Number of requests used to calculate the failure rate
+                .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED) // Count-based sliding window
+                .minimumNumberOfCalls(10) // Minimum number of calls to calculate failure rate
+                .waitIntervalInOpenState(Duration.ofMillis(3000)) // Time before transitioning from OPEN to HALF-OPEN
+                .timeoutDuration(Duration.ofMillis(2000)) // Timeout duration before a call is considered a failure
+                .automaticTransitionFromOpenToHalfOpen(true) // Automatically transition from OPEN to HALF-OPEN state
+                .build();
+
+        // Create and return the CircuitBreakerRegistry using the defined configuration
+        return CircuitBreakerRegistry.of(config);
+    }
+
+    // Bean to create a CircuitBreaker from the CircuitBreakerRegistry
+    @Bean
+    public CircuitBreaker myCircuitBreaker(CircuitBreakerRegistry circuitBreakerRegistry) {
+        // Get the CircuitBreaker instance from the registry
+        return circuitBreakerRegistry.circuitBreaker("myCircuitBreaker");
+    }
+}
+
+---------
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import org.springframework.stereotype.Service;
+
+@Service
+public class MyService {
+
+    private final CircuitBreakerRegistry circuitBreakerRegistry;
+
+    public MyService(CircuitBreakerRegistry circuitBreakerRegistry) {
+        this.circuitBreakerRegistry = circuitBreakerRegistry;
+    }
+
+    public String performOperation() {
+        // Get the CircuitBreaker from the registry
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("myCircuitBreaker");
+
+        // Wrap the operation inside the CircuitBreaker
+        return CircuitBreaker.decorateCheckedSupplier(circuitBreaker, () -> {
+            simulateOperation();
+            return "Operation completed successfully!";
+        }).get();
+    }
+
+    private void simulateOperation() throws Exception {
+        // Simulate a potentially failing operation
+        double failureChance = Math.random();
+        if (failureChance > 0.7) {
+            throw new Exception("Simulated failure");
+        }
+    }
+}
+
+Why Do We Need to "Wrap" the Code?
+
+    The circuit breaker needs to monitor the execution of the code. If the operation fails (e.g., throws an exception), the circuit breaker will register that failure and determine whether it should open (i.e., stop making further requests).
+
+    By wrapping the operation inside the decorateCheckedSupplier(), you're giving the circuit breaker control over the operation. It then:
+
+        Tracks whether the operation succeeds or fails.
+        Opens the circuit breaker if the failure threshold is exceeded.
+        Transitions back to Half-Open state if the failure rate goes down, and so on.
+		
+7.what is Bulkhead in resilience4j?
+
+	the Bulkhead pattern is a fault-tolerance strategy used to isolate parts of your system so that a failure in one part does not bring down the whole application. It's inspired by the concept of bulkheads in ships, which compartmentalize sections to prevent flooding from spreading.
+	
+	 if one external dependency (like a downstream service or database) becomes slow or unresponsive, you don't want all your threads to get blocked waiting for it. Bulkhead helps by limiting the number of concurrent calls to a particular service or component.
+	 
+	  Two types of Bulkheads in Resilience4j:
+    Semaphore Bulkhead:
+        Limits the number of concurrent calls using semaphores.
+        Non-blocking and ideal for CPU-bound operations.
+
+    ThreadPool Bulkhead:
+        Executes calls in a separate thread pool.
+        Useful for I/O-bound operations like calling external services.
+
+			Scenario							Use Which?						Why?
+				
+		Fast in-memory string formatting				SemaphoreBulkhead	No need to use another thread
+		REST call to external API (200–1000ms delay)	ThreadPoolBulkhead	Prevent caller thread from blocking
+		Reading from disk or file system				ThreadPoolBulkhead	Blocking I/O needs its own threads
+		Hashing password, doing complex math			SemaphoreBulkhead	CPU-bound, fast operation
+		Sending email via external SMTP API				ThreadPoolBulkhead	I/O-bound + latency involved
+	application.yml
+	----------------
+	resilience4j:
+  bulkhead:
+    instances:
+      demoServiceBulkhead:
+        maxConcurrentCalls: 3
+        maxWaitDuration: 0ms
+
+package com.example.demo.service;
+
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import org.springframework.stereotype.Service;
+
+@Service
+public class DemoService {
+
+    @Bulkhead(name = "demoServiceBulkhead", type = Bulkhead.Type.SEMAPHORE, fallbackMethod = "fallback")
+    public String processRequest() throws InterruptedException {
+        Thread.sleep(3000); // Simulate a slow process
+        return "Processed Successfully!";
+    }
+
+    public String fallback(Throwable t) {
+        return "Service is currently busy. Please try again later.";
+    }
+}
+----
+package com.example.demo.controller;
+
+import com.example.demo.service.DemoService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class DemoController {
+
+    private final DemoService demoService;
+
+    public DemoController(DemoService demoService) {
+        this.demoService = demoService;
+    }
+
+    @GetMapping("/process")
+    public String process() throws InterruptedException {
+        return demoService.processRequest();
+    }
+}
+Config property		Default value		Description
+maxConcurrentCalls	25				Max amount of parallel executions allowed by the bulkhead
+maxWaitDuration		0				Max amount of time a thread should be blocked for when attempting to enter a saturated bulkhead.
+
+	application.yml
+	---------
+	resilience4j.thread-pool-bulkhead:
+	  instances:
+		threadPoolService:
+		  maxThreadPoolSize: 5
+		  coreThreadPoolSize: 3
+		  queueCapacity: 10
+
+	Config property			Default value											Description
+	
+	maxThreadPoolSize		Runtime.getRuntime().availableProcessors()		Configures the max thread pool size.
+	coreThreadPoolSize		Runtime.getRuntime().availableProcessors() - 1	Configures the core thread pool size
+	queueCapacity			100												Configures the capacity of the queue.
+	keepAliveDuration		20 [ms]											When the number of threads is greater than the core, this is the maximum time that excess idle threads will wait for new tasks before terminating.
+	writableStackTraceEnabled	true										Output the stack trace error when a bulkhead exception is thrown.If false, output a single line with bulkhead exception.
+
+	import io.github.resilience4j.bulkhead.annotation.ThreadPoolBulkhead;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+import java.util.concurrent.CompletableFuture;
+
+@Service
+public class ThreadPoolService {
+
+    @Async
+    @ThreadPoolBulkhead(name = "threadPoolService", fallbackMethod = "fallback")
+    public CompletableFuture<String> callExternalService() {
+        try {
+            Thread.sleep(3000); // Simulate slow remote call
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return CompletableFuture.completedFuture("Response from external service");
+    }
+
+    public CompletableFuture<String> fallback(Throwable t) {
+        return CompletableFuture.completedFuture("Fallback: Service is currently overloaded");
+    }
+}
+
+@RestController
+public class ThreadPoolController {
+
+    private final ThreadPoolService service;
+
+    public ThreadPoolController(ThreadPoolService service) {
+        this.service = service;
+    }
+
+    @GetMapping("/threadpool")
+    public CompletableFuture<String> get() {
+        return service.callExternalService();
+    }
+}
+
+Resilience4j's ThreadPoolBulkhead offloads the execution to a separate thread pool, and that means your method must return something asynchronous — like CompletableFuture or Mono.
+
+That’s where @Async comes in.
+Tells Spring to run this method in a background thread.
+The method immediately returns a CompletableFuture to the caller.
+You don’t block the main thread.
+
+@SpringBootApplication
+@EnableAsync  // 👈 Required!
+public class YourApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(YourApplication.class, args);
+    }
+}
+
+
+	----BulkheadRegistry-----(with multiple instances)
+	@Configuration
+public class BulkheadConfig {
+
+    @Bean
+    public BulkheadRegistry bulkheadRegistry() {
+        BulkheadConfig config1 = BulkheadConfig.custom()
+                .maxConcurrentCalls(5)
+                .maxWaitDuration(java.time.Duration.ofMillis(500))
+                .build();
+        
+        BulkheadConfig config2 = BulkheadConfig.custom()
+                .maxConcurrentCalls(10)
+                .maxWaitDuration(java.time.Duration.ofMillis(1000))
+                .build();
+
+        BulkheadRegistry registry = BulkheadRegistry.of(config1);
+        
+        // Register multiple Bulkhead instances with different names
+        registry.bulkhead("bulkhead1");
+        registry.bulkhead("bulkhead2");
+
+        return registry;
+    }
+
+    @Bean
+    public Bulkhead bulkhead1(BulkheadRegistry bulkheadRegistry) {
+        return bulkheadRegistry.bulkhead("bulkhead1"); // Bulkhead with 5 concurrent calls
+    }
+
+    @Bean
+    public Bulkhead bulkhead2(BulkheadRegistry bulkheadRegistry) {
+        return bulkheadRegistry.bulkhead("bulkhead2"); // Bulkhead with 10 concurrent calls
+    }
+}
+
+
+@Service
+public class DemoService {
+
+    private final Bulkhead bulkhead1;
+    private final Bulkhead bulkhead2;
+
+    public DemoService(Bulkhead bulkhead1, Bulkhead bulkhead2) {
+        this.bulkhead1 = bulkhead1;
+        this.bulkhead2 = bulkhead2;
+    }
+
+    public String processRequestWithBulkhead1() {
+        // Use bulkhead1 for some operation
+        return Bulkhead.decorateSupplier(bulkhead1, () -> {
+            try {
+                Thread.sleep(2000); // Simulate a long-running task
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "Processed with Bulkhead 1!";
+        }).get();
+    }
+
+    public String processRequestWithBulkhead2() {
+        // Use bulkhead2 for a different operation
+        return Bulkhead.decorateSupplier(bulkhead2, () -> {
+            try {
+                Thread.sleep(2000); // Simulate a long-running task
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "Processed with Bulkhead 2!";
+        }).get();
+    }
+}
+		---ThreadPoolBulkheadRegistry ----
+		
+		package com.example.demo.config;
+
+import io.github.resilience4j.bulkhead.ThreadPoolBulkhead;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadConfig;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadRegistry;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class ThreadPoolBulkheadConfig {
+
+    @Bean
+    public ThreadPoolBulkheadRegistry threadPoolBulkheadRegistry() {
+        // Create ThreadPoolBulkheadConfig for "externalApiService"
+        ThreadPoolBulkheadConfig apiServiceConfig = ThreadPoolBulkheadConfig.custom()
+                .coreThreadPoolSize(2)   // Minimum number of threads in the pool
+                .maxThreadPoolSize(5)    // Maximum number of threads in the pool
+                .queueCapacity(10)       // Queue size for waiting requests
+                .build();
+
+        // Create ThreadPoolBulkheadConfig for "databaseService"
+        ThreadPoolBulkheadConfig dbServiceConfig = ThreadPoolBulkheadConfig.custom()
+                .coreThreadPoolSize(3)   // More threads for database operations
+                .maxThreadPoolSize(6)
+                .queueCapacity(15)
+                .build();
+
+        // Create ThreadPoolBulkheadRegistry
+        ThreadPoolBulkheadRegistry registry = ThreadPoolBulkheadRegistry.ofDefaults();
+
+        // Register different bulkheads with the registry using unique names
+        registry.bulkhead("externalApiService", apiServiceConfig);
+        registry.bulkhead("databaseService", dbServiceConfig);
+
+        return registry;
+    }
+
+    @Bean
+    public ThreadPoolBulkhead externalApiService(ThreadPoolBulkheadRegistry registry) {
+        // Retrieve the externalApiService ThreadPoolBulkhead from the registry
+        return registry.bulkhead("externalApiService");
+    }
+
+    @Bean
+    public ThreadPoolBulkhead databaseService(ThreadPoolBulkheadRegistry registry) {
+        // Retrieve the databaseService ThreadPoolBulkhead from the registry
+        return registry.bulkhead("databaseService");
+    }
+}
+
+
+package com.example.demo.service;
+
+import io.github.resilience4j.bulkhead.ThreadPoolBulkhead;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ExternalApiService {
+
+    private final ThreadPoolBulkhead externalApiServiceBulkhead;
+
+    public ExternalApiService(ThreadPoolBulkhead externalApiServiceBulkhead) {
+        this.externalApiServiceBulkhead = externalApiServiceBulkhead;
+    }
+
+    public String callExternalApi() {
+        // Decorate method with ThreadPoolBulkhead to control concurrency in thread pool
+        return ThreadPoolBulkhead.decorateSupplier(externalApiServiceBulkhead, () -> {
+            // Simulate a blocking call (e.g., calling an external API)
+            try {
+                Thread.sleep(2000);  // Simulating a blocking operation
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "External API Response";
+        }).get();
+    }
+}
+
+@Service
+public class DatabaseService {
+
+    private final ThreadPoolBulkhead databaseServiceBulkhead;
+
+    public DatabaseService(ThreadPoolBulkhead databaseServiceBulkhead) {
+        this.databaseServiceBulkhead = databaseServiceBulkhead;
+    }
+
+    public String queryDatabase() {
+        // Decorate method with ThreadPoolBulkhead for controlling DB queries
+        return ThreadPoolBulkhead.decorateSupplier(databaseServiceBulkhead, () -> {
+            // Simulate a blocking call (e.g., querying a database)
+            try {
+                Thread.sleep(1500);  // Simulating a blocking database query
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return "Database Query Result";
+        }).get();
+    }
+}
+
+package com.example.demo.controller;
+
+import com.example.demo.service.ExternalApiService;
+import com.example.demo.service.DatabaseService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ServiceController {
+
+    private final ExternalApiService externalApiService;
+    private final DatabaseService databaseService;
+
+    public ServiceController(ExternalApiService externalApiService, DatabaseService databaseService) {
+        this.externalApiService = externalApiService;
+        this.databaseService = databaseService;
+    }
+
+    @GetMapping("/call-external-api")
+    public String callExternalApi() {
+        return externalApiService.callExternalApi();
+    }
+
+    @GetMapping("/query-database")
+    public String queryDatabase() {
+        return databaseService.queryDatabase();
+    }
+}
+		-----with annotation-----
+		
+		package com.example.demo.service;
+
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ExternalApiService {
+
+    @Bulkhead(name = "externalApiService", type = Bulkhead.Type.THREADPOOL)
+    public String callExternalApi() {
+        // Simulate a blocking operation, such as calling an external API or performing I/O
+        try {
+            Thread.sleep(2000);  // Simulating blocking I/O operation
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "External API Response";
+    }
+}
+
+@Service
+public class DatabaseService {
+
+    @Bulkhead(name = "databaseService", type = Bulkhead.Type.THREADPOOL)
+    public String queryDatabase() {
+        // Simulate a blocking operation, such as querying a database
+        try {
+            Thread.sleep(1500);  // Simulating blocking DB query
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "Database Query Result";
+    }
+}
+
+-----
+package com.example.demo.config;
+
+import io.github.resilience4j.bulkhead.ThreadPoolBulkhead;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadConfig;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadRegistry;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class Resilience4jConfig {
+
+    @Bean
+    public ThreadPoolBulkheadRegistry threadPoolBulkheadRegistry() {
+        // Create ThreadPoolBulkheadConfig for "externalApiService"
+        ThreadPoolBulkheadConfig apiServiceConfig = ThreadPoolBulkheadConfig.custom()
+                .coreThreadPoolSize(2)   // Minimum number of threads in the pool
+                .maxThreadPoolSize(5)    // Maximum number of threads in the pool
+                .queueCapacity(10)       // Queue size for waiting requests
+                .build();
+
+        // Create ThreadPoolBulkheadConfig for "databaseService"
+        ThreadPoolBulkheadConfig dbServiceConfig = ThreadPoolBulkheadConfig.custom()
+                .coreThreadPoolSize(3)   // More threads for database operations
+                .maxThreadPoolSize(6)
+                .queueCapacity(15)
+                .build();
+
+        // Create and return ThreadPoolBulkheadRegistry
+        ThreadPoolBulkheadRegistry registry = ThreadPoolBulkheadRegistry.ofDefaults();
+
+        // Register bulkheads with the registry
+        registry.bulkhead("externalApiService", apiServiceConfig);
+        registry.bulkhead("databaseService", dbServiceConfig);
+
+        return registry;
+    }
+
+    @Bean
+    public ThreadPoolBulkhead externalApiService(ThreadPoolBulkheadRegistry registry) {
+        // Retrieve the "externalApiService" bulkhead from the registry
+        return registry.bulkhead("externalApiService");
+    }
+
+    @Bean
+    public ThreadPoolBulkhead databaseService(ThreadPoolBulkheadRegistry registry) {
+        // Retrieve the "databaseService" bulkhead from the registry
+        return registry.bulkhead("databaseService");
+    }
+}
+---
+package com.example.demo.controller;
+
+import com.example.demo.service.ExternalApiService;
+import com.example.demo.service.DatabaseService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ServiceController {
+
+    private final ExternalApiService externalApiService;
+    private final DatabaseService databaseService;
+
+    // Constructor injection for the services
+    public ServiceController(ExternalApiService externalApiService, DatabaseService databaseService) {
+        this.externalApiService = externalApiService;
+        this.databaseService = databaseService;
+    }
+
+    // Endpoint to trigger the external API service
+    @GetMapping("/call-external-api")
+    public String callExternalApi() {
+        return externalApiService.callExternalApi();
+    }
+
+    // Endpoint to trigger the database service
+    @GetMapping("/query-database")
+    public String queryDatabase() {
+        return databaseService.queryDatabase();
+    }
+}
+
+
+		-----All of Them----
+		resilience4j:
+  circuitbreaker:
+    instances:
+      myService:
+        registerHealthIndicator: true
+        failureRateThreshold: 50
+        slidingWindowSize: 100
+        minimumNumberOfCalls: 10
+        waitDurationInOpenState: 10000ms
+        permittedNumberOfCallsInHalfOpenState: 3
+        eventConsumerBufferSize: 10
+
+  retry:
+    instances:
+      myService:
+        maxAttempts: 3
+        waitDuration: 500ms
+        exponentialBackoffEnabled: true
+        multiplier: 2
+
+  ratelimiter:
+    instances:
+      myService:
+        limitForPeriod: 10
+        limitRefreshPeriod: 1s
+        timeoutDuration: 500ms
+
+  timelimiter:
+    instances:
+      myService:
+        timeoutDuration: 2000ms
+
+  bulkhead:
+    instances:
+      myService:
+        maxConcurrentCalls: 5
+        maxWaitDuration: 500ms
+------
+		
+		
+		import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.github.resilience4j.timelimiter.annotation.TimeLimiter;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import org.springframework.stereotype.Service;
+
+import java.util.concurrent.CompletableFuture;
+
+@Service
+public class MyService {
+
+    @CircuitBreaker(name = "myService", fallbackMethod = "fallbackMethod")
+    @Retry(name = "myService", fallbackMethod = "fallbackMethod")
+    @RateLimiter(name = "myService")
+    @TimeLimiter(name = "myService")  // TimeLimiter works only for async methods
+    @Bulkhead(name = "myService")		// Bulkhead works only for async methods // you don’t need to specify the type because THREADPOOL is the default. 
+    public CompletableFuture<String> callExternalService() {
+        // Simulate an asynchronous service call
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Simulate delay or long operation (e.g., service call)
+                Thread.sleep(3000); // 3 seconds delay
+                return "External service response";
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "Error in processing";
+            }
+        });
+    }
+
+    public String fallbackMethod(Exception ex) {
+        return "Fallback response due to failure: " + ex.getMessage();
+    }
+}
